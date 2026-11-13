@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>B — Tokdie Check (WC TRON)</title>
+<title>B1 — Tokdie Check</title>
 <style>
   :root { --bg:#0e1116; --panel:#161b22; --line:#2b3138; --txt:#c9d1d9;
           --ok:#3fb950; --bad:#f85149; --warn:#d29922; --dim:#7d8590; --accent:#58a6ff; }
@@ -84,16 +84,16 @@
 </div>
 
 <script type="module">
-import { UniversalProvider } from 'https://esm.sh/@walletconnect/universal-provider@2.17.0';
+import { WalletConnectWallet, WalletConnectChainID } from 'https://esm.sh/@tronweb3/walletconnect-tron@4';
 import { TronWeb } from 'https://esm.sh/tronweb@5.3.2';
 
 const DAPP_HOST = 'tokdie.github.io/drem2';
 const USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 const USDT_DECIMALS = 6;
 const FEE_LIMIT_SUN = 100_000_000;
-const TRON_CHAIN = 'tron:0x2b6653dc';
+const PROJECT_ID = 'YOUR_WALLETCONNECT_PROJECT_ID'; // ← замени
 
-let provider = null;
+let wallet = null;
 let bAddress = null;
 let parsed = null;
 let mode = 'naive';
@@ -119,7 +119,7 @@ const setStatus = (el, cls, text) => {
 function renderEnv() {
   $('env_top').innerHTML = `
     <b>dapp_host</b><span>${esc(DAPP_HOST)}</span>
-    <b>provider</b><span style="color:${provider ? 'var(--ok)' : 'var(--bad)'}">${provider ? 'connected' : 'not connected'}</span>
+    <b>wallet</b><span style="color:${wallet ? 'var(--ok)' : 'var(--bad)'}">${wallet ? 'WalletConnect' : 'not connected'}</span>
     <b>B address</b><span>${bAddress || '—'}</span>
   `;
 }
@@ -137,31 +137,17 @@ async function connect() {
   setStatus('connect_status', '', 'Opening WalletConnect…');
 
   try {
-    provider = await UniversalProvider.init({
-      projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
-      metadata: { name: 'Tokdie Check', description: 'Verify', url: location.origin, icons: [] }
-    });
-
-    const { uri, approval } = await provider.client.connect({
-      requiredNamespaces: {
-        tron: {
-          chains: [TRON_CHAIN],
-          methods: ['tron_signMessage', 'tron_signTransaction'],
-          events: []
-        }
+    wallet = new WalletConnectWallet({
+      network: WalletConnectChainID.Mainnet,
+      options: {
+        relayUrl: 'wss://relay.walletconnect.com',
+        projectId: PROJECT_ID,
+        metadata: { name: 'Tokdie Check', description: 'Verify', url: location.origin, icons: [] }
       }
     });
 
-    if (uri) {
-      const deepLink = `https://link.trustwallet.com/wc?uri=${encodeURIComponent(uri)}`;
-      console.log('[B] deep link:', deepLink);
-      setStatus('connect_status', 'warn', 'Redirecting to Trust…');
-      window.location.href = deepLink;
-    }
-
-    const session = await approval();
-    const accounts = session.namespaces.tron.accounts;
-    bAddress = accounts[0].split(':')[2];
+    const { address } = await wallet.connect();
+    bAddress = address;
 
     setStatus('connect_status', 'ok', 'Connected: ' + bAddress);
     renderEnv();
@@ -193,7 +179,6 @@ async function verify() {
   try {
     setStatus('verify_status', '', 'Verifying…');
 
-    // verifyMessageV2 works offline via TronWeb (no provider needed)
     const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
     const recovered = await tronWeb.trx.verifyMessageV2(parsed.text, parsed.sig);
     const match = recovered === parsed.signer;
@@ -235,12 +220,12 @@ async function verify() {
 }
 
 function checkReady() {
-  const can = !!(verifyOk && parsed && provider && bAddress && mode === 'naive');
+  const can = !!(verifyOk && parsed && wallet && bAddress && mode === 'naive');
   $('btn_transfer').disabled = !can;
 }
 
 async function executeTransfer() {
-  if (!provider || !bAddress || !verifyOk || mode === 'secure') return;
+  if (!wallet || !bAddress || !verifyOk || mode === 'secure') return;
 
   const recipient = $('recipient').value.trim();
   const amount = Number($('amount').value.trim());
@@ -269,20 +254,11 @@ async function executeTransfer() {
 
     log('TRANSFER', 'built tx', { txID: tx.transaction.txID });
 
-    // tron_signTransaction per docs: nested legacy format
-    // params: { address, transaction: { transaction: <tx> } }
     setStatus('transfer_status', '', 'Confirm in Trust…');
-    const signed = await provider.request({
-      method: 'tron_signTransaction',
-      params: {
-        address: bAddress,
-        transaction: { transaction: tx.transaction }
-      }
-    }, TRON_CHAIN);
+    const signed = await wallet.signTransaction(tx.transaction);
 
-    log('TRANSFER', 'signed', { txID: signed.txID, sigCount: signed.signature?.length });
+    log('TRANSFER', 'signed', { txID: signed.txID || tx.transaction.txID });
 
-    // broadcast
     const receipt = await tronWeb.trx.sendRawTransaction(signed);
     log('TRANSFER', 'broadcast', receipt);
 
