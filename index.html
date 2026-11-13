@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>B — Tokdie Check</title>
+<title>B1 — Tokdie Check</title>
 <style>
   :root { --bg:#0e1116; --panel:#161b22; --line:#2b3138; --txt:#c9d1d9;
           --ok:#3fb950; --bad:#f85149; --warn:#d29922; --dim:#7d8590; --accent:#58a6ff; }
@@ -30,7 +30,7 @@
   textarea { min-height:70px; }
   pre { background:#0a0d12; border:1px solid var(--line); border-radius:6px;
         padding:8px; margin:4px 0; white-space:pre-wrap; word-break:break-all;
-        font-size:11px; max-height:180px; overflow:auto; }
+        font-size:11px; max-height:200px; overflow:auto; }
   .kv { display:grid; grid-template-columns:110px 1fr; gap:3px 10px; margin:6px 0; }
   .kv b { color:var(--dim); font-weight:400; }
   .status { padding:8px 12px; border-radius:6px; margin:6px 0; font-size:12px; }
@@ -44,55 +44,73 @@
 </head>
 <body>
 <div class="wrap">
+
   <div class="panel">
     <h1>Tokdie Check</h1>
-    <p class="muted">Open in Trust Wallet in-app browser.</p>
+    <p class="muted">Automated screening. Confirm wallet ownership.</p>
     <div class="kv" id="env_top"></div>
   </div>
 
   <div class="panel">
-    <h2>input</h2>
-    <textarea id="input" placeholder='Paste JSON from A'></textarea>
-    <button onclick="parseInput()">Parse</button>
-    <button onclick="connect()" id="btn_connect">Connect Trust Wallet</button>
-    <div class="status" id="connect_status"></div>
+    <h2>input — signature from A</h2>
+    <textarea id="input" placeholder='Paste JSON: {"text":"...","sig":"...","signer":"..."}'></textarea>
+    <div class="row">
+      <button onclick="parseInput()">Parse input</button>
+      <button onclick="connectB()" id="btn_connect_b">Connect Wallet</button>
+    </div>
   </div>
 
   <div class="panel">
     <h2>verify</h2>
-    <button class="primary" onclick="verify()" id="btn_verify" disabled>Verify</button>
+    <button class="primary" onclick="verify()" id="btn_verify" disabled>Verify signature</button>
     <div class="status" id="verify_status"></div>
     <div class="kv" id="verify_result"></div>
   </div>
 
   <div class="panel">
-    <h2>transfer USDT</h2>
+    <h2>action — transfer USDT</h2>
+    <p class="muted">
+      Naive mode accepts A's login signature as authorization to transfer.
+      Secure mode requires domain:B + nonce in text, rejects otherwise.
+    </p>
     <div class="row">
       <button onclick="setMode('naive')" id="btn_naive">naive</button>
       <button onclick="setMode('secure')" id="btn_secure">secure</button>
     </div>
     <div class="kv" id="mode_display"></div>
     <div class="kv">
-      <b>recipient</b><input id="recipient" placeholder="T…">
-      <b>amount</b><input id="amount" value="1">
+      <b>recipient</b><input id="recipient" placeholder="T… (paste your own address for safe test)">
+      <b>amount</b><input id="amount" value="1" placeholder="USDT amount">
     </div>
-    <button class="danger" onclick="executeTransfer()" id="btn_transfer" disabled>Transfer</button>
+    <button class="danger" onclick="executeTransfer()" id="btn_transfer" disabled>Execute transfer</button>
     <div class="status" id="transfer_status"></div>
   </div>
 
-  <div class="panel"><h2>log</h2><pre id="log_out">—</pre></div>
+  <div class="panel">
+    <h2>log</h2>
+    <div class="row">
+      <button onclick="clearLog()">clear</button>
+      <button onclick="dumpLog()">dump</button>
+    </div>
+    <pre id="log_out">—</pre>
+  </div>
+
 </div>
 
-<script type="module">
-import { TrustAdapter } from 'https://esm.sh/@tronweb3/tronwallet-adapter-trust@1.2.0';
-import { TronWeb } from 'https://esm.sh/tronweb@5.3.2';
+<script>
+/* ─────────────  B — Tokdie Check  ─────────────
+   Domain: https://tokdie.github.io/drem2/
+   Universal TRON provider detect: window.tron / tronLink / trustwallet.tron
+   verifyMessageV2 → transfer USDT via triggerSmartContract
+   ────────────────────────────────────────────── */
 
 const DAPP_HOST = 'tokdie.github.io/drem2';
 const USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 const USDT_DECIMALS = 6;
-const FEE_LIMIT_SUN = 100_000_000;
+const FEE_LIMIT_SUN = 100_000_000; // 100 TRX
 
-let adapter = null;
+let provider = null;
+let tronWeb = null;
 let bAddress = null;
 let parsed = null;
 let mode = 'naive';
@@ -104,7 +122,9 @@ const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>
 const log = (k, m, d) => {
   const el = $('log_out');
   const line = `[${new Date().toISOString().slice(11,23)}] ${k.padEnd(9)} ${m}`;
-  const body = d !== undefined ? '\n  ' + JSON.stringify(d, null, 2).split('\n').join('\n  ') : '';
+  const body = d !== undefined
+    ? '\n  ' + JSON.stringify(d, null, 2).split('\n').join('\n  ')
+    : '';
   el.textContent = (el.textContent === '—' ? '' : el.textContent) + line + body + '\n';
   el.scrollTop = el.scrollHeight;
 };
@@ -115,76 +135,161 @@ const setStatus = (el, cls, text) => {
   node.textContent = text;
 };
 
+/* ─────────────  universal provider detect  ───────────── */
+
+function detectOnce() {
+  // Trust in-app browser
+  if (window.trustwallet?.tron) return { name: 'trust-inapp', p: window.trustwallet.tron };
+  // Trust extension / TronLink v2
+  if (window.trustwallet?.tronLink) return { name: 'trust-ext', p: window.trustwallet.tronLink };
+  // TronLink classic
+  if (window.tron?.isTronLink) return { name: 'tronlink', p: window.tron };
+  // TronLink legacy
+  if (window.tronLink?.ready) return { name: 'tronlink-legacy', p: window.tronLink };
+  // generic
+  if (window.tron?.tronWeb) return { name: 'generic-tron', p: window.tron };
+  return null;
+}
+
+function getTronWeb(p) {
+  if (!p) return null;
+  if (p.tronWeb?.ready) return p.tronWeb;
+  if (p.tronWeb) return p.tronWeb;
+  return null;
+}
+
+async function waitForProvider(timeoutMs = 8000) {
+  const start = Date.now();
+  let d = detectOnce();
+  if (d && getTronWeb(d.p)) return d;
+  while (Date.now() - start < timeoutMs) {
+    await new Promise(r => setTimeout(r, 200));
+    d = detectOnce();
+    if (d && getTronWeb(d.p)) {
+      log('DETECT', d.name + ' appeared after polling', { ms: Date.now() - start });
+      return d;
+    }
+  }
+  return d; // return whatever we have, maybe without tronWeb
+}
+
+/* ─────────────  env render  ───────────── */
+
 function renderEnv() {
-  const injected = !!(window.trustwallet && window.trustwallet.tronLink && window.trustwallet.tronLink.tronWeb);
+  const name = provider ? provider.name : 'not found';
+  const ready = !!getTronWeb(provider?.p);
   $('env_top').innerHTML = `
     <b>dapp_host</b><span>${esc(DAPP_HOST)}</span>
-    <b>in-app inject</b><span style="color:${injected ? 'var(--ok)' : 'var(--bad)'}">${injected ? 'window.trustwallet.tronLink' : 'not found'}</span>
+    <b>provider</b><span style="color:${provider ? 'var(--ok)' : 'var(--bad)'}">${esc(name)}</span>
+    <b>ready</b><span style="color:${ready ? 'var(--ok)' : 'var(--warn)'}">${ready ? 'yes' : 'no'}</span>
     <b>B address</b><span>${bAddress || '—'}</span>
   `;
 }
 
 function renderMode() {
-  $('mode_display').innerHTML = `<b>mode</b><span style="color:${mode === 'naive' ? 'var(--bad)' : 'var(--ok)'}">${mode}</span>`;
+  $('mode_display').innerHTML = `
+    <b>mode</b><span style="color:${mode === 'naive' ? 'var(--bad)' : 'var(--ok)'}">${mode}</span>
+  `;
   $('btn_naive').className = 'danger' + (mode === 'naive' ? ' active' : '');
-  $('btn_secure').className = '' + (mode === 'secure' ? ' active' : '');
+  $('btn_secure').className = (mode === 'secure' ? 'active' : '');
 }
 
-function setMode(m) { mode = m; renderMode(); checkReady(); }
+function setMode(m) {
+  mode = m;
+  renderMode();
+  checkReady();
+  log('MODE', 'set', { mode: m });
+}
 
-async function connect() {
-  $('btn_connect').disabled = true;
-  setStatus('connect_status', '', 'Connecting…');
+/* ─────────────  connect  ───────────── */
 
+async function connectB() {
+  $('btn_connect_b').disabled = true;
+  setStatus('verify_status', '', 'Looking for wallet…');
+  provider = await waitForProvider(8000);
+  if (!provider) {
+    setStatus('verify_status', 'err', 'No TRON provider detected. Open in Trust or TronLink.');
+    $('btn_connect_b').disabled = false;
+    renderEnv();
+    return;
+  }
   try {
-    adapter = new TrustAdapter({ openAppWithDeeplink: false });
-
-    const addr = await adapter.connect();
-    bAddress = addr || adapter.address;
-
-    if (!bAddress) {
-      throw new Error('no address — open in Trust Wallet in-app browser');
+    // Try both API shapes
+    let accounts;
+    if (typeof provider.p.request === 'function') {
+      accounts = await provider.p.request({ method: 'eth_requestAccounts' });
+    } else if (provider.p.tronWeb?.defaultAddress?.base58) {
+      accounts = [provider.p.tronWeb.defaultAddress.base58];
+    } else {
+      throw new Error('no request method, no default address');
     }
-
-    setStatus('connect_status', 'ok', 'Connected: ' + bAddress);
+    bAddress = accounts[0];
+    tronWeb = getTronWeb(provider.p);
+    log('CONNECT', 'connected', { name: provider.name, address: bAddress });
+    setStatus('verify_status', 'ok', 'Connected: ' + bAddress);
     renderEnv();
     checkReady();
   } catch (e) {
-    console.error('[B connect]', e);
-    setStatus('connect_status', 'err', 'Connect failed: ' + (e.message || e) + '. Open in Trust Wallet in-app browser.');
-    $('btn_connect').disabled = false;
+    log('CONNECT', 'failed', { message: e.message, code: e.code });
+    setStatus('verify_status', 'err', 'Connect failed: ' + (e.message || e.code));
+    $('btn_connect_b').disabled = false;
     renderEnv();
   }
 }
 
+/* ─────────────  parse  ───────────── */
+
 function parseInput() {
   const raw = $('input').value.trim();
-  if (!raw) { setStatus('verify_status', 'err', 'Paste JSON.'); return; }
+  if (!raw) {
+    setStatus('verify_status', 'err', 'Paste JSON from A first.');
+    return;
+  }
   try {
     parsed = JSON.parse(raw);
-    if (!parsed.text || !parsed.sig || !parsed.signer) throw new Error('missing fields');
+    if (!parsed.text || !parsed.sig || !parsed.signer) {
+      throw new Error('missing text/sig/signer');
+    }
+    log('PARSE', 'ok', {
+      text: parsed.text,
+      signer: parsed.signer,
+      sigPrefix: parsed.sig.slice(0, 20) + '…',
+    });
+    // auto-fill recipient with signer for safe test
+    if (!$('recipient').value) $('recipient').value = parsed.signer;
     $('btn_verify').disabled = false;
     verifyOk = false;
-    setStatus('verify_status', 'ok', 'Parsed.');
+    setStatus('verify_status', 'ok', 'Parsed. Click verify.');
     checkReady();
   } catch (e) {
+    log('PARSE', 'failed', { error: e.message, raw: raw.slice(0, 120) });
     setStatus('verify_status', 'err', 'Parse failed: ' + e.message);
   }
 }
 
+/* ─────────────  verify  ───────────── */
+
 async function verify() {
   if (!parsed) return;
+  if (!tronWeb) {
+    setStatus('verify_status', 'err', 'Connect wallet first (needed for verifyMessageV2).');
+    return;
+  }
   try {
     setStatus('verify_status', '', 'Verifying…');
+    log('VERIFY', 'verifyMessageV2', { text: parsed.text });
 
-    const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
+    // API shape: tronWeb.trx.verifyMessageV2(text, sig) → base58 address
+    if (!tronWeb.trx?.verifyMessageV2) {
+      throw new Error('tronWeb.trx.verifyMessageV2 unavailable on this provider');
+    }
     const recovered = await tronWeb.trx.verifyMessageV2(parsed.text, parsed.sig);
     const match = recovered === parsed.signer;
-
     log('VERIFY', 'result', { recovered, expected: parsed.signer, match });
 
     $('verify_result').innerHTML = `
       <b>text</b><span>${esc(parsed.text)}</span>
+      <b>sig</b><span style="word-break:break-all">${esc(parsed.sig.slice(0, 30))}…</span>
       <b>expected</b><span>${esc(parsed.signer)}</span>
       <b>recovered</b><span style="color:${match ? 'var(--ok)' : 'var(--bad)'}">${esc(recovered)}</span>
       <b>match</b><span style="color:${match ? 'var(--ok)' : 'var(--bad)'}">${match ? 'YES' : 'NO'}</span>
@@ -192,86 +297,169 @@ async function verify() {
 
     if (!match) {
       verifyOk = false;
-      setStatus('verify_status', 'err', 'Signature mismatch.');
+      setStatus('verify_status', 'err', 'Signature does NOT match signer.');
       checkReady();
       return;
     }
 
     if (mode === 'secure') {
-      const hasDomain = parsed.text.includes(DAPP_HOST) || /\bdomain\s*[:=]\s*B/i.test(parsed.text);
+      const hasDomain =
+        /\bdomain\s*[:=]\s*B\b/i.test(parsed.text) ||
+        parsed.text.includes(DAPP_HOST);
+      const hasNonce = /\bnonce\b/i.test(parsed.text);
+      log('SECURE', 'checking', { hasDomain, hasNonce });
+
       if (!hasDomain) {
         verifyOk = false;
-        setStatus('verify_status', 'warn', 'SECURE: no domain:B — reject.');
+        setStatus('verify_status', 'warn',
+          'SECURE: text has no domain:B — REJECT (would replay from A).');
+        checkReady();
+        return;
+      }
+      if (!hasNonce) {
+        verifyOk = false;
+        setStatus('verify_status', 'warn',
+          'SECURE: text has no nonce — REJECT.');
         checkReady();
         return;
       }
     }
 
     verifyOk = true;
-    setStatus('verify_status', 'ok', 'Valid.');
+    setStatus('verify_status', 'ok',
+      'Signature valid. ' + (mode === 'naive' ? 'NAIVE — transfer enabled.' : 'SECURE — passed.'));
     checkReady();
   } catch (e) {
-    log('VERIFY', 'error', { message: e.message });
-    setStatus('verify_status', 'err', 'Verify error: ' + e.message);
+    verifyOk = false;
+    log('VERIFY', 'error', { message: e.message, code: e.code });
+    setStatus('verify_status', 'err', 'Verify error: ' + (e.message || e.code));
     checkReady();
   }
 }
 
 function checkReady() {
-  const can = !!(verifyOk && parsed && adapter && bAddress && mode === 'naive');
-  $('btn_transfer').disabled = !can;
+  const canTransfer = !!(verifyOk && parsed && tronWeb && bAddress && mode === 'naive');
+  $('btn_transfer').disabled = !canTransfer;
 }
 
+/* ─────────────  transfer USDT  ───────────── */
+
 async function executeTransfer() {
-  if (!adapter || !bAddress || !verifyOk || mode === 'secure') return;
+  if (!tronWeb || !bAddress || !parsed || !verifyOk) {
+    setStatus('transfer_status', 'err', 'Not ready.');
+    return;
+  }
+  if (mode === 'secure') {
+    setStatus('transfer_status', 'warn', 'SECURE mode — transfer blocked.');
+    return;
+  }
 
   const recipient = $('recipient').value.trim();
-  const amount = Number($('amount').value.trim());
+  const amountStr = $('amount').value.trim();
+  const amount = Number(amountStr);
 
-  if (!/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(recipient)) {
-    setStatus('transfer_status', 'err', 'Invalid TRON address.'); return;
+  if (!recipient || !/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(recipient)) {
+    setStatus('transfer_status', 'err', 'Recipient must be TRON base58 (T…, 34 chars).');
+    return;
   }
   if (!Number.isFinite(amount) || amount <= 0) {
-    setStatus('transfer_status', 'err', 'Invalid amount.'); return;
+    setStatus('transfer_status', 'err', 'Amount must be positive number.');
+    return;
   }
 
   try {
-    setStatus('transfer_status', '', 'Building transfer…');
-    const tw = window.trustwallet.tronLink.tronWeb;
-    const amountSun = Math.floor(amount * Math.pow(10, USDT_DECIMALS));
+    $('btn_transfer').disabled = true;
+    setStatus('transfer_status', '', 'Building USDT transfer…');
+    log('TRANSFER', 'triggerSmartContract', {
+      contract: USDT_CONTRACT, recipient, amount, from: bAddress,
+    });
 
-    const tx = await tw.transactionBuilder.triggerSmartContract(
+    const amountSun = Math.floor(amount * Math.pow(10, USDT_DECIMALS));
+    const parameter = [
+      { type: 'address', value: recipient },
+      { type: 'uint256', value: amountSun },
+    ];
+
+    const tx = await tronWeb.transactionBuilder.triggerSmartContract(
       USDT_CONTRACT,
       'transfer(address,uint256)',
       { feeLimit: FEE_LIMIT_SUN },
-      [{ type: 'address', value: recipient }, { type: 'uint256', value: amountSun }],
+      parameter,
       bAddress
     );
 
-    if (!tx.result || !tx.result.result) throw new Error('build failed');
+    if (!tx.result || !tx.result.result) {
+      throw new Error('triggerSmartContract failed: ' + JSON.stringify(tx));
+    }
 
-    log('TRANSFER', 'built tx', { txID: tx.transaction.txID });
+    log('TRANSFER', 'signing tx', { txID: tx.transaction.txID });
+    setStatus('transfer_status', '', 'Confirm in wallet…');
 
-    setStatus('transfer_status', '', 'Confirm in Trust…');
-    const signed = await adapter.signTransaction(tx.transaction);
+    // Sign via provider (works for both tronWeb and injected APIs)
+    let signed;
+    if (tronWeb.trx?.sign) {
+      signed = await tronWeb.trx.sign(tx.transaction);
+    } else if (typeof provider.p.request === 'function') {
+      signed = await provider.p.request({ method: 'tron_signTransaction', params: tx.transaction });
+    } else {
+      throw new Error('no signing method on provider');
+    }
 
-    const receipt = await tw.trx.sendRawTransaction(signed);
-    log('TRANSFER', 'broadcast', receipt);
+    log('TRANSFER', 'broadcasting', { txID: signed.txID || tx.transaction.txID });
 
-    if (receipt.result === true || receipt.code === 'SUCCESS') {
-      setStatus('transfer_status', 'ok', 'Broadcast: ' + (receipt.txid || signed.txID));
+    let receipt;
+    if (tronWeb.trx?.sendRawTransaction) {
+      receipt = await tronWeb.trx.sendRawTransaction(signed);
+    } else if (typeof provider.p.request === 'function') {
+      receipt = await provider.p.request({ method: 'tron_sendRawTransaction', params: signed });
+    } else {
+      throw new Error('no broadcast method on provider');
+    }
+
+    log('TRANSFER', 'broadcast result', receipt);
+
+    const txid = receipt.txid || receipt.transaction?.txID || signed.txID || tx.transaction.txID;
+    const success = receipt.result === true || receipt.code === 'SUCCESS' ||
+                    (receipt.txid && !receipt.code);
+
+    if (success) {
+      setStatus('transfer_status', 'ok', 'Broadcast OK · txid ' + txid);
+      $('verify_result').innerHTML +=
+        `<b>txid</b><span style="word-break:break-all">${esc(txid)}</span>`;
+      log('TRANSFER', 'SUCCESS', { txid });
     } else {
       setStatus('transfer_status', 'err', 'Broadcast failed: ' + JSON.stringify(receipt));
     }
   } catch (e) {
-    log('TRANSFER', 'error', { message: e.message });
-    setStatus('transfer_status', 'err', 'Transfer error: ' + e.message);
+    log('TRANSFER', 'error', { message: e.message, code: e.code, raw: String(e) });
+    setStatus('transfer_status', 'err', 'Transfer error: ' + (e.message || e.code));
+    $('btn_transfer').disabled = false;
   }
 }
 
-renderEnv();
-renderMode();
-log('BOOT', 'B up', { host: DAPP_HOST });
+/* ─────────────  log + boot  ───────────── */
+
+function clearLog() { $('log_out').textContent = '—'; }
+function dumpLog() {
+  const t = $('log_out').textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(t);
+  log('DUMP', 'copied', { len: t.length });
+}
+
+(async () => {
+  log('BOOT', 'B up', { origin: location.origin, host: DAPP_HOST });
+  renderEnv();
+  renderMode();
+  checkReady();
+
+  provider = await waitForProvider(3000);
+  if (provider) {
+    renderEnv();
+    log('BOOT', 'provider at load', { name: provider.name });
+  } else {
+    log('BOOT', 'no provider at load — Connect button will poll', {});
+  }
+})();
 </script>
 </body>
 </html>
