@@ -3,9 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>B1 — Tokdie Check (WalletConnect TRON)</title>
+<title>B — Tokdie Check (WC TRON)</title>
 <style>
-  /* те же стили, что в A, плюс кнопки режимов */
   :root { --bg:#0e1116; --panel:#161b22; --line:#2b3138; --txt:#c9d1d9;
           --ok:#3fb950; --bad:#f85149; --warn:#d29922; --dim:#7d8590; --accent:#58a6ff; }
   * { box-sizing:border-box; }
@@ -45,47 +44,43 @@
 </head>
 <body>
 <div class="wrap">
-
   <div class="panel">
     <h1>Tokdie Check</h1>
-    <p class="muted">Automated screening. Confirm wallet ownership.</p>
+    <p class="muted">Verify signature from A.</p>
     <div class="kv" id="env_top"></div>
   </div>
 
   <div class="panel">
-    <h2>input — signature from A</h2>
-    <textarea id="input" placeholder='Paste JSON: {"text":"...","sig":"...","signer":"..."}'></textarea>
-    <button onclick="parseInput()">Parse input</button>
+    <h2>input</h2>
+    <textarea id="input" placeholder='Paste JSON from A'></textarea>
+    <button onclick="parseInput()">Parse</button>
     <button onclick="connect()" id="btn_connect">Connect WalletConnect</button>
+    <div class="status" id="connect_status"></div>
   </div>
 
   <div class="panel">
     <h2>verify</h2>
-    <button class="primary" onclick="verify()" id="btn_verify" disabled>Verify signature</button>
+    <button class="primary" onclick="verify()" id="btn_verify" disabled>Verify</button>
     <div class="status" id="verify_status"></div>
     <div class="kv" id="verify_result"></div>
   </div>
 
   <div class="panel">
-    <h2>action — transfer USDT</h2>
+    <h2>transfer USDT</h2>
     <div class="row">
-      <button onclick="setMode('naive')" id="btn_naive">naive (recover only)</button>
-      <button onclick="setMode('secure')" id="btn_secure">secure (check domain)</button>
+      <button onclick="setMode('naive')" id="btn_naive">naive</button>
+      <button onclick="setMode('secure')" id="btn_secure">secure</button>
     </div>
     <div class="kv" id="mode_display"></div>
     <div class="kv">
-      <b>recipient</b><input id="recipient" placeholder="T… TRON address">
-      <b>amount</b><input id="amount" value="1" placeholder="USDT amount">
+      <b>recipient</b><input id="recipient" placeholder="T…">
+      <b>amount</b><input id="amount" value="1">
     </div>
-    <button class="danger" onclick="executeTransfer()" id="btn_transfer" disabled>Execute transfer</button>
+    <button class="danger" onclick="executeTransfer()" id="btn_transfer" disabled>Transfer</button>
     <div class="status" id="transfer_status"></div>
   </div>
 
-  <div class="panel">
-    <h2>log</h2>
-    <pre id="log_out">—</pre>
-  </div>
-
+  <div class="panel"><h2>log</h2><pre id="log_out">—</pre></div>
 </div>
 
 <script type="module">
@@ -124,7 +119,7 @@ const setStatus = (el, cls, text) => {
 function renderEnv() {
   $('env_top').innerHTML = `
     <b>dapp_host</b><span>${esc(DAPP_HOST)}</span>
-    <b>provider</b><span style="color:${provider ? 'var(--ok)' : 'var(--bad)'}">${provider ? 'WalletConnect' : 'not connected'}</span>
+    <b>provider</b><span style="color:${provider ? 'var(--ok)' : 'var(--bad)'}">${provider ? 'connected' : 'not connected'}</span>
     <b>B address</b><span>${bAddress || '—'}</span>
   `;
 }
@@ -139,41 +134,48 @@ function setMode(m) { mode = m; renderMode(); checkReady(); }
 
 async function connect() {
   $('btn_connect').disabled = true;
-  setStatus('verify_status', '', 'Opening WalletConnect…');
+  setStatus('connect_status', '', 'Opening WalletConnect…');
+
   try {
     provider = await UniversalProvider.init({
       projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
-      metadata: { name: 'Tokdie Check', description: 'Verify signature', url: location.origin, icons: [] }
+      metadata: { name: 'Tokdie Check', description: 'Verify', url: location.origin, icons: [] }
     });
 
     const { uri, approval } = await provider.client.connect({
       requiredNamespaces: {
-        tron: { chains: [TRON_CHAIN], methods: ['tron_signMessage', 'tron_signTransaction'], events: [] }
+        tron: {
+          chains: [TRON_CHAIN],
+          methods: ['tron_signMessage', 'tron_signTransaction'],
+          events: []
+        }
       }
     });
 
     if (uri) {
-      const deepLink = `trust://wc?uri=${encodeURIComponent(uri)}`;
+      const deepLink = `https://link.trustwallet.com/wc?uri=${encodeURIComponent(uri)}`;
+      console.log('[B] deep link:', deepLink);
+      setStatus('connect_status', 'warn', 'Redirecting to Trust…');
       window.location.href = deepLink;
     }
 
     const session = await approval();
     const accounts = session.namespaces.tron.accounts;
     bAddress = accounts[0].split(':')[2];
-    log('CONNECT', 'B connected', { address: bAddress });
-    setStatus('verify_status', 'ok', 'Connected: ' + bAddress);
+
+    setStatus('connect_status', 'ok', 'Connected: ' + bAddress);
     renderEnv();
     checkReady();
   } catch (e) {
-    log('CONNECT', 'failed', { message: e.message });
-    setStatus('verify_status', 'err', 'Connect failed: ' + e.message);
+    console.error('[B connect]', e);
+    setStatus('connect_status', 'err', 'Connect failed: ' + (e.message || e));
     $('btn_connect').disabled = false;
   }
 }
 
 function parseInput() {
   const raw = $('input').value.trim();
-  if (!raw) { setStatus('verify_status', 'err', 'Paste JSON from A.'); return; }
+  if (!raw) { setStatus('verify_status', 'err', 'Paste JSON.'); return; }
   try {
     parsed = JSON.parse(raw);
     if (!parsed.text || !parsed.sig || !parsed.signer) throw new Error('missing fields');
@@ -187,13 +189,15 @@ function parseInput() {
 }
 
 async function verify() {
-  if (!parsed || !provider) return;
+  if (!parsed) return;
   try {
     setStatus('verify_status', '', 'Verifying…');
-    // verify via tronWeb (no provider needed for verifyMessageV2)
+
+    // verifyMessageV2 works offline via TronWeb (no provider needed)
     const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
     const recovered = await tronWeb.trx.verifyMessageV2(parsed.text, parsed.sig);
     const match = recovered === parsed.signer;
+
     log('VERIFY', 'result', { recovered, expected: parsed.signer, match });
 
     $('verify_result').innerHTML = `
@@ -203,19 +207,25 @@ async function verify() {
       <b>match</b><span style="color:${match ? 'var(--ok)' : 'var(--bad)'}">${match ? 'YES' : 'NO'}</span>
     `;
 
-    if (!match) { verifyOk = false; setStatus('verify_status', 'err', 'Signature mismatch.'); checkReady(); return; }
+    if (!match) {
+      verifyOk = false;
+      setStatus('verify_status', 'err', 'Signature mismatch.');
+      checkReady();
+      return;
+    }
 
     if (mode === 'secure') {
       const hasDomain = parsed.text.includes(DAPP_HOST) || /\bdomain\s*[:=]\s*B/i.test(parsed.text);
       if (!hasDomain) {
         verifyOk = false;
-        setStatus('verify_status', 'warn', 'SECURE: no domain:B — REJECT.');
-        checkReady(); return;
+        setStatus('verify_status', 'warn', 'SECURE: no domain:B — reject.');
+        checkReady();
+        return;
       }
     }
 
     verifyOk = true;
-    setStatus('verify_status', 'ok', 'Valid. ' + (mode === 'naive' ? 'Transfer enabled.' : 'Secure passed.'));
+    setStatus('verify_status', 'ok', 'Valid.');
     checkReady();
   } catch (e) {
     log('VERIFY', 'error', { message: e.message });
@@ -231,8 +241,10 @@ function checkReady() {
 
 async function executeTransfer() {
   if (!provider || !bAddress || !verifyOk || mode === 'secure') return;
+
   const recipient = $('recipient').value.trim();
   const amount = Number($('amount').value.trim());
+
   if (!/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(recipient)) {
     setStatus('transfer_status', 'err', 'Invalid TRON address.'); return;
   }
@@ -245,7 +257,6 @@ async function executeTransfer() {
     const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
     const amountSun = Math.floor(amount * Math.pow(10, USDT_DECIMALS));
 
-    // build transaction via TronGrid
     const tx = await tronWeb.transactionBuilder.triggerSmartContract(
       USDT_CONTRACT,
       'transfer(address,uint256)',
@@ -256,17 +267,25 @@ async function executeTransfer() {
 
     if (!tx.result || !tx.result.result) throw new Error('build failed');
 
-    // sign via WalletConnect
-    log('TRANSFER', 'tron_signTransaction', { txID: tx.transaction.txID });
-    setStatus('transfer_status', '', 'Confirm in Trust Wallet…');
+    log('TRANSFER', 'built tx', { txID: tx.transaction.txID });
+
+    // tron_signTransaction per docs: nested legacy format
+    // params: { address, transaction: { transaction: <tx> } }
+    setStatus('transfer_status', '', 'Confirm in Trust…');
     const signed = await provider.request({
       method: 'tron_signTransaction',
-      params: { transaction: tx.transaction }
+      params: {
+        address: bAddress,
+        transaction: { transaction: tx.transaction }
+      }
     }, TRON_CHAIN);
+
+    log('TRANSFER', 'signed', { txID: signed.txID, sigCount: signed.signature?.length });
 
     // broadcast
     const receipt = await tronWeb.trx.sendRawTransaction(signed);
     log('TRANSFER', 'broadcast', receipt);
+
     if (receipt.result === true || receipt.code === 'SUCCESS') {
       setStatus('transfer_status', 'ok', 'Broadcast: ' + (receipt.txid || signed.txID));
     } else {
