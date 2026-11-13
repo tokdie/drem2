@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>B — Tokdie Check</title>
+<title>B1 — Tokdie Check (WalletConnect TRON)</title>
 <style>
+  /* те же стили, что в A, плюс кнопки режимов */
   :root { --bg:#0e1116; --panel:#161b22; --line:#2b3138; --txt:#c9d1d9;
           --ok:#3fb950; --bad:#f85149; --warn:#d29922; --dim:#7d8590; --accent:#58a6ff; }
   * { box-sizing:border-box; }
@@ -30,7 +31,7 @@
   textarea { min-height:70px; }
   pre { background:#0a0d12; border:1px solid var(--line); border-radius:6px;
         padding:8px; margin:4px 0; white-space:pre-wrap; word-break:break-all;
-        font-size:11px; max-height:200px; overflow:auto; }
+        font-size:11px; max-height:180px; overflow:auto; }
   .kv { display:grid; grid-template-columns:110px 1fr; gap:3px 10px; margin:6px 0; }
   .kv b { color:var(--dim); font-weight:400; }
   .status { padding:8px 12px; border-radius:6px; margin:6px 0; font-size:12px; }
@@ -54,10 +55,8 @@
   <div class="panel">
     <h2>input — signature from A</h2>
     <textarea id="input" placeholder='Paste JSON: {"text":"...","sig":"...","signer":"..."}'></textarea>
-    <div class="row">
-      <button onclick="parseInput()">Parse input</button>
-      <button onclick="connectB()" id="btn_connect_b">Connect TronLink</button>
-    </div>
+    <button onclick="parseInput()">Parse input</button>
+    <button onclick="connect()" id="btn_connect">Connect WalletConnect</button>
   </div>
 
   <div class="panel">
@@ -69,17 +68,13 @@
 
   <div class="panel">
     <h2>action — transfer USDT</h2>
-    <p class="muted">
-      Naive mode: treats A's login signature as authorization to transfer USDT.
-      Secure mode: requires domain:B and nonce in text, rejects otherwise.
-    </p>
     <div class="row">
       <button onclick="setMode('naive')" id="btn_naive">naive (recover only)</button>
       <button onclick="setMode('secure')" id="btn_secure">secure (check domain)</button>
     </div>
     <div class="kv" id="mode_display"></div>
     <div class="kv">
-      <b>recipient</b><input id="recipient" value="" placeholder="T… TRON address">
+      <b>recipient</b><input id="recipient" placeholder="T… TRON address">
       <b>amount</b><input id="amount" value="1" placeholder="USDT amount">
     </div>
     <button class="danger" onclick="executeTransfer()" id="btn_transfer" disabled>Execute transfer</button>
@@ -88,31 +83,22 @@
 
   <div class="panel">
     <h2>log</h2>
-    <div class="row">
-      <button onclick="clearLog()">clear</button>
-      <button onclick="dumpLog()">dump</button>
-    </div>
     <pre id="log_out">—</pre>
   </div>
 
 </div>
 
-<script>
-/* ─────────────  B — Tokdie Check  ─────────────
-   Domain: https://tokdie.github.io/drem2/
-   Takes (text, sig, signer) from A (drem/).
-   verifyMessageV2(text, sig) === signer ?
-   naive → transfer USDT; secure → check domain/nonce.
-   ────────────────────────────────────────────── */
+<script type="module">
+import { UniversalProvider } from 'https://esm.sh/@walletconnect/universal-provider@2.17.0';
+import { TronWeb } from 'https://esm.sh/tronweb@5.3.2';
 
 const DAPP_HOST = 'tokdie.github.io/drem2';
-const DAPP_ORIGIN = 'https://tokdie.github.io';
 const USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 const USDT_DECIMALS = 6;
-const FEE_LIMIT_SUN = 100_000_000; // 100 TRX
+const FEE_LIMIT_SUN = 100_000_000;
+const TRON_CHAIN = 'tron:0x2b6653dc';
 
-let tronProvider = null;
-let tronWeb = null;
+let provider = null;
 let bAddress = null;
 let parsed = null;
 let mode = 'naive';
@@ -124,9 +110,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>
 const log = (k, m, d) => {
   const el = $('log_out');
   const line = `[${new Date().toISOString().slice(11,23)}] ${k.padEnd(9)} ${m}`;
-  const body = d !== undefined
-    ? '\n  ' + JSON.stringify(d, null, 2).split('\n').join('\n  ')
-    : '';
+  const body = d !== undefined ? '\n  ' + JSON.stringify(d, null, 2).split('\n').join('\n  ') : '';
   el.textContent = (el.textContent === '—' ? '' : el.textContent) + line + body + '\n';
   el.scrollTop = el.scrollHeight;
 };
@@ -137,308 +121,166 @@ const setStatus = (el, cls, text) => {
   node.textContent = text;
 };
 
-/* ─────────────  TronLink detection + polling  ───────────── */
-
-function detectOnce() {
-  if (window.tron && window.tron.isTronLink) return window.tron;
-  if (window.tronLink && window.tronLink.ready) return window.tronLink;
-  return null;
-}
-
-async function waitForTronLink(timeoutMs = 8000) {
-  const start = Date.now();
-  let p = detectOnce();
-  if (p) return p;
-  while (Date.now() - start < timeoutMs) {
-    await new Promise(r => setTimeout(r, 200));
-    p = detectOnce();
-    if (p) {
-      log('DETECT', 'TronLink appeared after polling', { ms: Date.now() - start });
-      return p;
-    }
-  }
-  return null;
-}
-
-/* TIP-6963 announce (if TronLink supports it) */
-window.addEventListener('TIP6963:announceProvider', (e) => {
-  if (e.detail && e.detail.info && e.detail.info.name === 'TronLink') {
-    tronProvider = e.detail.provider;
-    log('DETECT', 'TronLink via TIP-6963');
-    renderEnv();
-  }
-});
-window.dispatchEvent(new Event('TIP6963:requestProvider'));
-
-/* ─────────────  env render  ───────────── */
-
 function renderEnv() {
-  const ready = !!(tronProvider && tronProvider.tronWeb && tronProvider.tronWeb.ready);
   $('env_top').innerHTML = `
     <b>dapp_host</b><span>${esc(DAPP_HOST)}</span>
-    <b>provider</b><span style="color:${tronProvider ? 'var(--ok)' : 'var(--bad)'}">${tronProvider ? 'TronLink' : 'not found'}</span>
-    <b>ready</b><span style="color:${ready ? 'var(--ok)' : 'var(--warn)'}">${ready ? 'yes' : 'no'}</span>
+    <b>provider</b><span style="color:${provider ? 'var(--ok)' : 'var(--bad)'}">${provider ? 'WalletConnect' : 'not connected'}</span>
     <b>B address</b><span>${bAddress || '—'}</span>
   `;
 }
 
 function renderMode() {
-  $('mode_display').innerHTML = `
-    <b>mode</b><span style="color:${mode === 'naive' ? 'var(--bad)' : 'var(--ok)'}">${mode}</span>
-  `;
+  $('mode_display').innerHTML = `<b>mode</b><span style="color:${mode === 'naive' ? 'var(--bad)' : 'var(--ok)'}">${mode}</span>`;
   $('btn_naive').className = 'danger' + (mode === 'naive' ? ' active' : '');
   $('btn_secure').className = '' + (mode === 'secure' ? ' active' : '');
 }
 
-function setMode(m) {
-  mode = m;
-  renderMode();
-  checkReady();
-  log('MODE', 'set', { mode: m });
-}
+function setMode(m) { mode = m; renderMode(); checkReady(); }
 
-/* ─────────────  connect  ───────────── */
-
-async function connectB() {
-  $('btn_connect_b').disabled = true;
-  setStatus('verify_status', '', 'Looking for TronLink…');
-  tronProvider = await waitForTronLink(8000);
-  if (!tronProvider) {
-    setStatus('verify_status', 'err',
-      'TronLink not detected. Install TronLink extension and unlock it on this domain.');
-    log('CONNECT', 'no provider after polling');
-    $('btn_connect_b').disabled = false;
-    renderEnv();
-    return;
-  }
+async function connect() {
+  $('btn_connect').disabled = true;
+  setStatus('verify_status', '', 'Opening WalletConnect…');
   try {
-    const accounts = await tronProvider.request({ method: 'eth_requestAccounts' });
-    bAddress = accounts[0];
-    tronWeb = tronProvider.tronWeb;
-    log('CONNECT', 'B connected', { address: bAddress, host: DAPP_HOST });
+    provider = await UniversalProvider.init({
+      projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
+      metadata: { name: 'Tokdie Check', description: 'Verify signature', url: location.origin, icons: [] }
+    });
+
+    const { uri, approval } = await provider.client.connect({
+      requiredNamespaces: {
+        tron: { chains: [TRON_CHAIN], methods: ['tron_signMessage', 'tron_signTransaction'], events: [] }
+      }
+    });
+
+    if (uri) {
+      const deepLink = `trust://wc?uri=${encodeURIComponent(uri)}`;
+      window.location.href = deepLink;
+    }
+
+    const session = await approval();
+    const accounts = session.namespaces.tron.accounts;
+    bAddress = accounts[0].split(':')[2];
+    log('CONNECT', 'B connected', { address: bAddress });
     setStatus('verify_status', 'ok', 'Connected: ' + bAddress);
     renderEnv();
     checkReady();
   } catch (e) {
-    log('CONNECT', 'failed', { message: e.message, code: e.code });
-    setStatus('verify_status', 'err', 'Connect failed: ' + (e.message || e.code));
-    $('btn_connect_b').disabled = false;
-    renderEnv();
+    log('CONNECT', 'failed', { message: e.message });
+    setStatus('verify_status', 'err', 'Connect failed: ' + e.message);
+    $('btn_connect').disabled = false;
   }
 }
 
-/* ─────────────  parse  ───────────── */
-
 function parseInput() {
   const raw = $('input').value.trim();
-  if (!raw) {
-    setStatus('verify_status', 'err', 'Paste JSON from A first.');
-    return;
-  }
+  if (!raw) { setStatus('verify_status', 'err', 'Paste JSON from A.'); return; }
   try {
     parsed = JSON.parse(raw);
-    if (!parsed.text || !parsed.sig || !parsed.signer) {
-      throw new Error('missing text/sig/signer');
-    }
-    log('PARSE', 'ok', {
-      host: DAPP_HOST,
-      text: parsed.text,
-      signer: parsed.signer,
-      sigPrefix: parsed.sig.slice(0, 20) + '…',
-    });
+    if (!parsed.text || !parsed.sig || !parsed.signer) throw new Error('missing fields');
     $('btn_verify').disabled = false;
     verifyOk = false;
-    setStatus('verify_status', 'ok', 'Parsed. Click verify.');
+    setStatus('verify_status', 'ok', 'Parsed.');
     checkReady();
   } catch (e) {
-    log('PARSE', 'failed', { error: e.message, raw: raw.slice(0, 120) });
     setStatus('verify_status', 'err', 'Parse failed: ' + e.message);
   }
 }
 
-/* ─────────────  verify  ───────────── */
-
 async function verify() {
-  if (!parsed) return;
-  if (!tronWeb) {
-    setStatus('verify_status', 'err', 'Connect TronLink first (needed for verifyMessageV2).');
-    return;
-  }
+  if (!parsed || !provider) return;
   try {
     setStatus('verify_status', '', 'Verifying…');
-    log('VERIFY', 'calling verifyMessageV2', { text: parsed.text });
+    // verify via tronWeb (no provider needed for verifyMessageV2)
+    const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
     const recovered = await tronWeb.trx.verifyMessageV2(parsed.text, parsed.sig);
     const match = recovered === parsed.signer;
-    log('VERIFY', 'result', { recovered, expected: parsed.signer, match, host: DAPP_HOST });
+    log('VERIFY', 'result', { recovered, expected: parsed.signer, match });
 
     $('verify_result').innerHTML = `
       <b>text</b><span>${esc(parsed.text)}</span>
-      <b>sig</b><span style="word-break:break-all">${esc(parsed.sig.slice(0, 30))}…</span>
       <b>expected</b><span>${esc(parsed.signer)}</span>
       <b>recovered</b><span style="color:${match ? 'var(--ok)' : 'var(--bad)'}">${esc(recovered)}</span>
       <b>match</b><span style="color:${match ? 'var(--ok)' : 'var(--bad)'}">${match ? 'YES' : 'NO'}</span>
     `;
 
-    if (!match) {
-      verifyOk = false;
-      setStatus('verify_status', 'err', 'Signature does NOT match signer.');
-      checkReady();
-      return;
-    }
+    if (!match) { verifyOk = false; setStatus('verify_status', 'err', 'Signature mismatch.'); checkReady(); return; }
 
     if (mode === 'secure') {
-      const hasDomain =
-        /\bdomain\s*[:=]\s*B\b/i.test(parsed.text) ||
-        parsed.text.includes(DAPP_HOST) ||
-        parsed.text.includes('B.tokdie');
-      const hasNonce = /\bnonce\b/i.test(parsed.text);
-
-      log('SECURE', 'checking', { hasDomain, hasNonce, text: parsed.text });
-
+      const hasDomain = parsed.text.includes(DAPP_HOST) || /\bdomain\s*[:=]\s*B/i.test(parsed.text);
       if (!hasDomain) {
         verifyOk = false;
-        setStatus('verify_status', 'warn',
-          'SECURE: text has no domain:B — REJECT (would replay from A).');
-        checkReady();
-        return;
-      }
-      if (!hasNonce) {
-        verifyOk = false;
-        setStatus('verify_status', 'warn',
-          'SECURE: text has no nonce — REJECT (replay possible).');
-        checkReady();
-        return;
+        setStatus('verify_status', 'warn', 'SECURE: no domain:B — REJECT.');
+        checkReady(); return;
       }
     }
 
     verifyOk = true;
-    setStatus('verify_status', 'ok',
-      'Signature valid. ' + (mode === 'naive'
-        ? 'NAIVE — transfer enabled.'
-        : 'SECURE — passed.'));
+    setStatus('verify_status', 'ok', 'Valid. ' + (mode === 'naive' ? 'Transfer enabled.' : 'Secure passed.'));
     checkReady();
   } catch (e) {
-    verifyOk = false;
-    log('VERIFY', 'error', { message: e.message, code: e.code });
-    setStatus('verify_status', 'err', 'Verify error: ' + (e.message || e.code));
+    log('VERIFY', 'error', { message: e.message });
+    setStatus('verify_status', 'err', 'Verify error: ' + e.message);
     checkReady();
   }
 }
 
 function checkReady() {
-  const canTransfer = !!(verifyOk && parsed && tronWeb && bAddress && mode === 'naive');
-  $('btn_transfer').disabled = !canTransfer;
+  const can = !!(verifyOk && parsed && provider && bAddress && mode === 'naive');
+  $('btn_transfer').disabled = !can;
 }
 
-/* ─────────────  transfer USDT  ───────────── */
-
 async function executeTransfer() {
-  if (!tronWeb || !bAddress || !parsed || !verifyOk) {
-    setStatus('transfer_status', 'err', 'Not ready.');
-    return;
-  }
-  if (mode === 'secure') {
-    setStatus('transfer_status', 'warn', 'SECURE mode — transfer blocked.');
-    return;
-  }
-
+  if (!provider || !bAddress || !verifyOk || mode === 'secure') return;
   const recipient = $('recipient').value.trim();
-  const amountStr = $('amount').value.trim();
-  const amount = Number(amountStr);
-
-  if (!recipient || !/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(recipient)) {
-    setStatus('transfer_status', 'err', 'Recipient must be valid TRON base58 (T…, 34 chars).');
-    return;
+  const amount = Number($('amount').value.trim());
+  if (!/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(recipient)) {
+    setStatus('transfer_status', 'err', 'Invalid TRON address.'); return;
   }
   if (!Number.isFinite(amount) || amount <= 0) {
-    setStatus('transfer_status', 'err', 'Amount must be positive number.');
-    return;
+    setStatus('transfer_status', 'err', 'Invalid amount.'); return;
   }
 
   try {
-    $('btn_transfer').disabled = true;
-    setStatus('transfer_status', '', 'Building USDT transfer…');
-    log('TRANSFER', 'triggerSmartContract', {
-      host: DAPP_HOST,
-      contract: USDT_CONTRACT,
-      recipient,
-      amount,
-      from: bAddress,
-    });
-
+    setStatus('transfer_status', '', 'Building transfer…');
+    const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
     const amountSun = Math.floor(amount * Math.pow(10, USDT_DECIMALS));
-    const parameter = [
-      { type: 'address', value: recipient },
-      { type: 'uint256', value: amountSun },
-    ];
 
+    // build transaction via TronGrid
     const tx = await tronWeb.transactionBuilder.triggerSmartContract(
       USDT_CONTRACT,
       'transfer(address,uint256)',
       { feeLimit: FEE_LIMIT_SUN },
-      parameter,
+      [{ type: 'address', value: recipient }, { type: 'uint256', value: amountSun }],
       bAddress
     );
 
-    if (!tx.result || !tx.result.result) {
-      throw new Error('triggerSmartContract failed: ' + JSON.stringify(tx));
-    }
+    if (!tx.result || !tx.result.result) throw new Error('build failed');
 
-    log('TRANSFER', 'signing tx', { txID: tx.transaction.txID });
-    setStatus('transfer_status', '', 'Confirm in TronLink…');
-    const signed = await tronWeb.trx.sign(tx.transaction);
+    // sign via WalletConnect
+    log('TRANSFER', 'tron_signTransaction', { txID: tx.transaction.txID });
+    setStatus('transfer_status', '', 'Confirm in Trust Wallet…');
+    const signed = await provider.request({
+      method: 'tron_signTransaction',
+      params: { transaction: tx.transaction }
+    }, TRON_CHAIN);
 
-    log('TRANSFER', 'broadcasting', { txID: signed.txID });
+    // broadcast
     const receipt = await tronWeb.trx.sendRawTransaction(signed);
-
-    log('TRANSFER', 'broadcast result', receipt);
-
-    const success =
-      receipt.result === true ||
-      receipt.code === 'SUCCESS' ||
-      (receipt.txid && !receipt.code);
-
-    if (success) {
-      const txid = receipt.txid || signed.txID;
-      setStatus('transfer_status', 'ok', 'Broadcast OK · txid ' + txid);
-      $('verify_result').innerHTML +=
-        `<b>txid</b><span style="word-break:break-all">${esc(txid)}</span>`;
+    log('TRANSFER', 'broadcast', receipt);
+    if (receipt.result === true || receipt.code === 'SUCCESS') {
+      setStatus('transfer_status', 'ok', 'Broadcast: ' + (receipt.txid || signed.txID));
     } else {
       setStatus('transfer_status', 'err', 'Broadcast failed: ' + JSON.stringify(receipt));
     }
   } catch (e) {
-    log('TRANSFER', 'error', { message: e.message, code: e.code, raw: String(e) });
-    setStatus('transfer_status', 'err', 'Transfer error: ' + (e.message || e.code));
-    $('btn_transfer').disabled = false;
+    log('TRANSFER', 'error', { message: e.message });
+    setStatus('transfer_status', 'err', 'Transfer error: ' + e.message);
   }
 }
 
-/* ─────────────  log controls + boot  ───────────── */
-
-function clearLog() { $('log_out').textContent = '—'; }
-function dumpLog() {
-  const t = $('log_out').textContent;
-  if (navigator.clipboard) navigator.clipboard.writeText(t);
-  log('DUMP', 'copied', { len: t.length });
-}
-
-/* async boot: try detect, but don't block */
-(async () => {
-  log('BOOT', 'B up', { origin: location.origin, host: DAPP_HOST });
-  renderEnv();
-  renderMode();
-  checkReady();
-
-  // passive polling on load, but connect is still user-driven
-  const p = await waitForTronLink(3000);
-  if (p) {
-    tronProvider = p;
-    renderEnv();
-    log('BOOT', 'TronLink ready at load', {});
-  } else {
-    log('BOOT', 'TronLink not present at load — connect button will poll', {});
-  }
-})();
+renderEnv();
+renderMode();
+log('BOOT', 'B up', { host: DAPP_HOST });
 </script>
 </body>
 </html>
