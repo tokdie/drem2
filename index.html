@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>B1 — Tokdie Check</title>
+<title>B — Tokdie Check</title>
 <style>
   :root { --bg:#0e1116; --panel:#161b22; --line:#2b3138; --txt:#c9d1d9;
           --ok:#3fb950; --bad:#f85149; --warn:#d29922; --dim:#7d8590; --accent:#58a6ff; }
@@ -46,7 +46,7 @@
 <div class="wrap">
   <div class="panel">
     <h1>Tokdie Check</h1>
-    <p class="muted">Verify signature from A.</p>
+    <p class="muted">Open in Trust Wallet in-app browser.</p>
     <div class="kv" id="env_top"></div>
   </div>
 
@@ -54,7 +54,7 @@
     <h2>input</h2>
     <textarea id="input" placeholder='Paste JSON from A'></textarea>
     <button onclick="parseInput()">Parse</button>
-    <button onclick="connect()" id="btn_connect">Connect WalletConnect</button>
+    <button onclick="connect()" id="btn_connect">Connect Trust Wallet</button>
     <div class="status" id="connect_status"></div>
   </div>
 
@@ -84,16 +84,15 @@
 </div>
 
 <script type="module">
-import { WalletConnectWallet, WalletConnectChainID } from 'https://esm.sh/@tronweb3/walletconnect-tron@4';
+import { TrustAdapter } from 'https://esm.sh/@tronweb3/tronwallet-adapter-trust@1.2.0';
 import { TronWeb } from 'https://esm.sh/tronweb@5.3.2';
 
 const DAPP_HOST = 'tokdie.github.io/drem2';
 const USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 const USDT_DECIMALS = 6;
 const FEE_LIMIT_SUN = 100_000_000;
-const PROJECT_ID = 'YOUR_WALLETCONNECT_PROJECT_ID'; // ← замени
 
-let wallet = null;
+let adapter = null;
 let bAddress = null;
 let parsed = null;
 let mode = 'naive';
@@ -117,9 +116,10 @@ const setStatus = (el, cls, text) => {
 };
 
 function renderEnv() {
+  const injected = !!(window.trustwallet && window.trustwallet.tronLink && window.trustwallet.tronLink.tronWeb);
   $('env_top').innerHTML = `
     <b>dapp_host</b><span>${esc(DAPP_HOST)}</span>
-    <b>wallet</b><span style="color:${wallet ? 'var(--ok)' : 'var(--bad)'}">${wallet ? 'WalletConnect' : 'not connected'}</span>
+    <b>in-app inject</b><span style="color:${injected ? 'var(--ok)' : 'var(--bad)'}">${injected ? 'window.trustwallet.tronLink' : 'not found'}</span>
     <b>B address</b><span>${bAddress || '—'}</span>
   `;
 }
@@ -134,28 +134,26 @@ function setMode(m) { mode = m; renderMode(); checkReady(); }
 
 async function connect() {
   $('btn_connect').disabled = true;
-  setStatus('connect_status', '', 'Opening WalletConnect…');
+  setStatus('connect_status', '', 'Connecting…');
 
   try {
-    wallet = new WalletConnectWallet({
-      network: WalletConnectChainID.Mainnet,
-      options: {
-        relayUrl: 'wss://relay.walletconnect.com',
-        projectId: PROJECT_ID,
-        metadata: { name: 'Tokdie Check', description: 'Verify', url: location.origin, icons: [] }
-      }
-    });
+    adapter = new TrustAdapter({ openAppWithDeeplink: false });
 
-    const { address } = await wallet.connect();
-    bAddress = address;
+    const addr = await adapter.connect();
+    bAddress = addr || adapter.address;
+
+    if (!bAddress) {
+      throw new Error('no address — open in Trust Wallet in-app browser');
+    }
 
     setStatus('connect_status', 'ok', 'Connected: ' + bAddress);
     renderEnv();
     checkReady();
   } catch (e) {
     console.error('[B connect]', e);
-    setStatus('connect_status', 'err', 'Connect failed: ' + (e.message || e));
+    setStatus('connect_status', 'err', 'Connect failed: ' + (e.message || e) + '. Open in Trust Wallet in-app browser.');
     $('btn_connect').disabled = false;
+    renderEnv();
   }
 }
 
@@ -220,12 +218,12 @@ async function verify() {
 }
 
 function checkReady() {
-  const can = !!(verifyOk && parsed && wallet && bAddress && mode === 'naive');
+  const can = !!(verifyOk && parsed && adapter && bAddress && mode === 'naive');
   $('btn_transfer').disabled = !can;
 }
 
 async function executeTransfer() {
-  if (!wallet || !bAddress || !verifyOk || mode === 'secure') return;
+  if (!adapter || !bAddress || !verifyOk || mode === 'secure') return;
 
   const recipient = $('recipient').value.trim();
   const amount = Number($('amount').value.trim());
@@ -239,10 +237,10 @@ async function executeTransfer() {
 
   try {
     setStatus('transfer_status', '', 'Building transfer…');
-    const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
+    const tw = window.trustwallet.tronLink.tronWeb;
     const amountSun = Math.floor(amount * Math.pow(10, USDT_DECIMALS));
 
-    const tx = await tronWeb.transactionBuilder.triggerSmartContract(
+    const tx = await tw.transactionBuilder.triggerSmartContract(
       USDT_CONTRACT,
       'transfer(address,uint256)',
       { feeLimit: FEE_LIMIT_SUN },
@@ -255,11 +253,9 @@ async function executeTransfer() {
     log('TRANSFER', 'built tx', { txID: tx.transaction.txID });
 
     setStatus('transfer_status', '', 'Confirm in Trust…');
-    const signed = await wallet.signTransaction(tx.transaction);
+    const signed = await adapter.signTransaction(tx.transaction);
 
-    log('TRANSFER', 'signed', { txID: signed.txID || tx.transaction.txID });
-
-    const receipt = await tronWeb.trx.sendRawTransaction(signed);
+    const receipt = await tw.trx.sendRawTransaction(signed);
     log('TRANSFER', 'broadcast', receipt);
 
     if (receipt.result === true || receipt.code === 'SUCCESS') {
