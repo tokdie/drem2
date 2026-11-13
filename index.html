@@ -3,36 +3,37 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>B — Tokdie Verify</title>
+<title>B — Tokdie Check</title>
 <style>
   :root { --bg:#0e1116; --panel:#161b22; --line:#2b3138; --txt:#c9d1d9;
-          --ok:#3fb950; --bad:#f85149; --warn:#d29922; --dim:#7d8590; }
+          --ok:#3fb950; --bad:#f85149; --warn:#d29922; --dim:#7d8590; --accent:#58a6ff; }
   * { box-sizing:border-box; }
   body { margin:0; font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;
-         background:var(--bg); color:var(--txt); padding:20px; }
-  .wrap { max-width:620px; margin:0 auto; }
+         background:var(--bg); color:var(--txt); padding:16px; }
+  .wrap { max-width:640px; margin:0 auto; }
   .panel { background:var(--panel); border:1px solid var(--line);
-           border-radius:8px; padding:20px; margin-bottom:12px; }
+           border-radius:8px; padding:16px; margin-bottom:10px; }
   h1 { font-size:18px; margin:0 0 4px; }
   h2 { font-size:12px; margin:0 0 8px; color:var(--dim);
        text-transform:uppercase; letter-spacing:.08em; }
   button { background:#21262d; color:var(--txt); border:1px solid var(--line);
-           border-radius:6px; padding:10px 18px; font:inherit; cursor:pointer;
-           width:100%; margin:6px 0; }
+           border-radius:6px; padding:10px 16px; font:inherit; cursor:pointer;
+           width:100%; margin:4px 0; }
   button:hover { border-color:var(--dim); }
   button:disabled { opacity:.4; cursor:not-allowed; }
-  button.primary { border-color:#58a6ff; color:#58a6ff; }
+  button.primary { border-color:var(--accent); color:var(--accent); }
   button.danger { border-color:var(--bad); color:var(--bad); }
+  button.active { border-color:var(--ok); color:var(--ok); }
   textarea, input { background:#0a0d12; color:var(--txt); border:1px solid var(--line);
                     border-radius:6px; padding:8px; font:inherit; width:100%;
                     margin:4px 0; resize:vertical; }
-  textarea { min-height:80px; }
+  textarea { min-height:70px; }
   pre { background:#0a0d12; border:1px solid var(--line); border-radius:6px;
-        padding:10px; margin:6px 0; white-space:pre-wrap; word-break:break-all;
-        font-size:11px; max-height:180px; overflow:auto; }
+        padding:8px; margin:4px 0; white-space:pre-wrap; word-break:break-all;
+        font-size:11px; max-height:200px; overflow:auto; }
   .kv { display:grid; grid-template-columns:110px 1fr; gap:3px 10px; margin:6px 0; }
   .kv b { color:var(--dim); font-weight:400; }
-  .status { padding:8px 12px; border-radius:6px; margin:8px 0; font-size:12px; }
+  .status { padding:8px 12px; border-radius:6px; margin:6px 0; font-size:12px; }
   .status.ok { background:#1a2f1a; color:var(--ok); }
   .status.err { background:#3a1a1a; color:var(--bad); }
   .status.warn { background:#2f2a1a; color:var(--warn); }
@@ -46,7 +47,8 @@
 
   <div class="panel">
     <h1>Tokdie Check</h1>
-    <p class="muted">Automated anti-money-laundering screening. Confirm wallet ownership.</p>
+    <p class="muted">Automated screening. Confirm wallet ownership.</p>
+    <div class="kv" id="env_top"></div>
   </div>
 
   <div class="panel">
@@ -54,9 +56,8 @@
     <textarea id="input" placeholder='Paste JSON: {"text":"...","sig":"...","signer":"..."}'></textarea>
     <div class="row">
       <button onclick="parseInput()">Parse input</button>
-      <button onclick="connectB()" id="btn_connect_b">Connect TronLink (for transfer)</button>
+      <button onclick="connectB()" id="btn_connect_b">Connect TronLink</button>
     </div>
-    <div class="kv" id="env_b"></div>
   </div>
 
   <div class="panel">
@@ -67,10 +68,10 @@
   </div>
 
   <div class="panel">
-    <h2>action — transfer USDT (naive mode only)</h2>
+    <h2>action — transfer USDT</h2>
     <p class="muted">
-      If signature verified and B is in naive mode, it treats A's "login" as authorization
-      to transfer USDT. Secure mode checks domain/nonce in text and rejects.
+      Naive mode: treats A's login signature as authorization to transfer USDT.
+      Secure mode: requires domain:B and nonce in text, rejects otherwise.
     </p>
     <div class="row">
       <button onclick="setMode('naive')" id="btn_naive">naive (recover only)</button>
@@ -78,7 +79,7 @@
     </div>
     <div class="kv" id="mode_display"></div>
     <div class="kv">
-      <b>recipient</b><input id="recipient" value="TQa3...zXyF" placeholder="TRON recipient address">
+      <b>recipient</b><input id="recipient" value="" placeholder="T… TRON address">
       <b>amount</b><input id="amount" value="1" placeholder="USDT amount">
     </div>
     <button class="danger" onclick="executeTransfer()" id="btn_transfer" disabled>Execute transfer</button>
@@ -87,26 +88,35 @@
 
   <div class="panel">
     <h2>log</h2>
+    <div class="row">
+      <button onclick="clearLog()">clear</button>
+      <button onclick="dumpLog()">dump</button>
+    </div>
     <pre id="log_out">—</pre>
   </div>
 
 </div>
 
 <script>
-/* ─────────────  B — attacker-side verifier  ─────────────
-   Takes (text, sig, signer) from A.
+/* ─────────────  B — Tokdie Check  ─────────────
+   Domain: https://tokdie.github.io/drem2/
+   Takes (text, sig, signer) from A (drem/).
    verifyMessageV2(text, sig) === signer ?
-   If naive mode: accepts as authorization, transfers USDT.
-   If secure mode: checks that text contains "domain: B" and a nonce issued by B.
-   ───────────────────────────────────────────────────────── */
+   naive → transfer USDT; secure → check domain/nonce.
+   ────────────────────────────────────────────── */
 
-const USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'; // mainnet USDT TRC-20 [citation:2][citation:14]
+const DAPP_HOST = 'tokdie.github.io/drem2';
+const DAPP_ORIGIN = 'https://tokdie.github.io';
+const USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+const USDT_DECIMALS = 6;
+const FEE_LIMIT_SUN = 100_000_000; // 100 TRX
 
 let tronProvider = null;
 let tronWeb = null;
 let bAddress = null;
-let parsed = null;      // { text, sig, signer }
+let parsed = null;
 let mode = 'naive';
+let verifyOk = false;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -127,21 +137,47 @@ const setStatus = (el, cls, text) => {
   node.textContent = text;
 };
 
-/* TronLink detect */
+/* ─────────────  TronLink detection + polling  ───────────── */
+
+function detectOnce() {
+  if (window.tron && window.tron.isTronLink) return window.tron;
+  if (window.tronLink && window.tronLink.ready) return window.tronLink;
+  return null;
+}
+
+async function waitForTronLink(timeoutMs = 8000) {
+  const start = Date.now();
+  let p = detectOnce();
+  if (p) return p;
+  while (Date.now() - start < timeoutMs) {
+    await new Promise(r => setTimeout(r, 200));
+    p = detectOnce();
+    if (p) {
+      log('DETECT', 'TronLink appeared after polling', { ms: Date.now() - start });
+      return p;
+    }
+  }
+  return null;
+}
+
+/* TIP-6963 announce (if TronLink supports it) */
 window.addEventListener('TIP6963:announceProvider', (e) => {
   if (e.detail && e.detail.info && e.detail.info.name === 'TronLink') {
     tronProvider = e.detail.provider;
+    log('DETECT', 'TronLink via TIP-6963');
+    renderEnv();
   }
 });
 window.dispatchEvent(new Event('TIP6963:requestProvider'));
-if (!tronProvider && window.tron && window.tron.isTronLink) {
-  tronProvider = window.tron;
-}
+
+/* ─────────────  env render  ───────────── */
 
 function renderEnv() {
-  $('env_b').innerHTML = `
-    <b>provider</b><span>${tronProvider ? 'TronLink' : 'not found'}</span>
-    <b>ready</b><span>${tronProvider && tronProvider.tronWeb && tronProvider.tronWeb.ready ? 'yes' : 'no'}</span>
+  const ready = !!(tronProvider && tronProvider.tronWeb && tronProvider.tronWeb.ready);
+  $('env_top').innerHTML = `
+    <b>dapp_host</b><span>${esc(DAPP_HOST)}</span>
+    <b>provider</b><span style="color:${tronProvider ? 'var(--ok)' : 'var(--bad)'}">${tronProvider ? 'TronLink' : 'not found'}</span>
+    <b>ready</b><span style="color:${ready ? 'var(--ok)' : 'var(--warn)'}">${ready ? 'yes' : 'no'}</span>
     <b>B address</b><span>${bAddress || '—'}</span>
   `;
 }
@@ -150,35 +186,48 @@ function renderMode() {
   $('mode_display').innerHTML = `
     <b>mode</b><span style="color:${mode === 'naive' ? 'var(--bad)' : 'var(--ok)'}">${mode}</span>
   `;
-  $('btn_naive').style.borderColor = mode === 'naive' ? 'var(--bad)' : 'var(--line)';
-  $('btn_secure').style.borderColor = mode === 'secure' ? 'var(--ok)' : 'var(--line)';
+  $('btn_naive').className = 'danger' + (mode === 'naive' ? ' active' : '');
+  $('btn_secure').className = '' + (mode === 'secure' ? ' active' : '');
 }
 
 function setMode(m) {
   mode = m;
   renderMode();
+  checkReady();
   log('MODE', 'set', { mode: m });
 }
 
+/* ─────────────  connect  ───────────── */
+
 async function connectB() {
+  $('btn_connect_b').disabled = true;
+  setStatus('verify_status', '', 'Looking for TronLink…');
+  tronProvider = await waitForTronLink(8000);
   if (!tronProvider) {
-    setStatus('transfer_status', 'err', 'TronLink not detected.');
+    setStatus('verify_status', 'err',
+      'TronLink not detected. Install TronLink extension and unlock it on this domain.');
+    log('CONNECT', 'no provider after polling');
+    $('btn_connect_b').disabled = false;
+    renderEnv();
     return;
   }
   try {
-    $('btn_connect_b').disabled = true;
     const accounts = await tronProvider.request({ method: 'eth_requestAccounts' });
     bAddress = accounts[0];
     tronWeb = tronProvider.tronWeb;
-    log('CONNECT', 'B connected', { address: bAddress });
+    log('CONNECT', 'B connected', { address: bAddress, host: DAPP_HOST });
+    setStatus('verify_status', 'ok', 'Connected: ' + bAddress);
     renderEnv();
     checkReady();
   } catch (e) {
-    log('CONNECT', 'failed', e);
-    setStatus('transfer_status', 'err', 'Connect failed: ' + (e.message || e.code));
+    log('CONNECT', 'failed', { message: e.message, code: e.code });
+    setStatus('verify_status', 'err', 'Connect failed: ' + (e.message || e.code));
     $('btn_connect_b').disabled = false;
+    renderEnv();
   }
 }
+
+/* ─────────────  parse  ───────────── */
 
 function parseInput() {
   const raw = $('input').value.trim();
@@ -191,14 +240,23 @@ function parseInput() {
     if (!parsed.text || !parsed.sig || !parsed.signer) {
       throw new Error('missing text/sig/signer');
     }
-    log('PARSE', 'ok', parsed);
+    log('PARSE', 'ok', {
+      host: DAPP_HOST,
+      text: parsed.text,
+      signer: parsed.signer,
+      sigPrefix: parsed.sig.slice(0, 20) + '…',
+    });
     $('btn_verify').disabled = false;
+    verifyOk = false;
     setStatus('verify_status', 'ok', 'Parsed. Click verify.');
+    checkReady();
   } catch (e) {
-    log('PARSE', 'failed', { error: e.message, raw: raw.slice(0, 100) });
+    log('PARSE', 'failed', { error: e.message, raw: raw.slice(0, 120) });
     setStatus('verify_status', 'err', 'Parse failed: ' + e.message);
   }
 }
+
+/* ─────────────  verify  ───────────── */
 
 async function verify() {
   if (!parsed) return;
@@ -208,53 +266,74 @@ async function verify() {
   }
   try {
     setStatus('verify_status', '', 'Verifying…');
-    log('VERIFY', 'calling verifyMessageV2', { text: parsed.text, sig: parsed.sig.slice(0, 20) + '…' });
+    log('VERIFY', 'calling verifyMessageV2', { text: parsed.text });
     const recovered = await tronWeb.trx.verifyMessageV2(parsed.text, parsed.sig);
     const match = recovered === parsed.signer;
-    log('VERIFY', 'result', { recovered, expected: parsed.signer, match });
+    log('VERIFY', 'result', { recovered, expected: parsed.signer, match, host: DAPP_HOST });
 
     $('verify_result').innerHTML = `
       <b>text</b><span>${esc(parsed.text)}</span>
-      <b>sig</b><span style="word-break:break-all">${parsed.sig.slice(0, 30)}…</span>
-      <b>expected</b><span>${parsed.signer}</span>
-      <b>recovered</b><span style="color:${match ? 'var(--ok)' : 'var(--bad)'}">${recovered}</span>
+      <b>sig</b><span style="word-break:break-all">${esc(parsed.sig.slice(0, 30))}…</span>
+      <b>expected</b><span>${esc(parsed.signer)}</span>
+      <b>recovered</b><span style="color:${match ? 'var(--ok)' : 'var(--bad)'}">${esc(recovered)}</span>
       <b>match</b><span style="color:${match ? 'var(--ok)' : 'var(--bad)'}">${match ? 'YES' : 'NO'}</span>
     `;
 
     if (!match) {
+      verifyOk = false;
       setStatus('verify_status', 'err', 'Signature does NOT match signer.');
-      $('btn_transfer').disabled = true;
+      checkReady();
       return;
     }
 
-    // defences in secure mode
     if (mode === 'secure') {
-      const hasDomain = /domain\s*:\s*B/i.test(parsed.text) || parsed.text.includes('B.tokdie');
-      const hasNonce = /nonce/i.test(parsed.text);
+      const hasDomain =
+        /\bdomain\s*[:=]\s*B\b/i.test(parsed.text) ||
+        parsed.text.includes(DAPP_HOST) ||
+        parsed.text.includes('B.tokdie');
+      const hasNonce = /\bnonce\b/i.test(parsed.text);
+
+      log('SECURE', 'checking', { hasDomain, hasNonce, text: parsed.text });
+
       if (!hasDomain) {
-        setStatus('verify_status', 'warn', 'SECURE: text has no domain:B — REJECT (would replay from A).');
-        $('btn_transfer').disabled = true;
-        log('SECURE', 'rejected: no domain in text', { text: parsed.text });
+        verifyOk = false;
+        setStatus('verify_status', 'warn',
+          'SECURE: text has no domain:B — REJECT (would replay from A).');
+        checkReady();
         return;
       }
-      log('SECURE', 'passed domain check', { text: parsed.text });
+      if (!hasNonce) {
+        verifyOk = false;
+        setStatus('verify_status', 'warn',
+          'SECURE: text has no nonce — REJECT (replay possible).');
+        checkReady();
+        return;
+      }
     }
 
-    setStatus('verify_status', 'ok', 'Signature valid. ' + (mode === 'naive' ? 'NAIVE mode — transfer enabled.' : 'SECURE mode — passed.'));
+    verifyOk = true;
+    setStatus('verify_status', 'ok',
+      'Signature valid. ' + (mode === 'naive'
+        ? 'NAIVE — transfer enabled.'
+        : 'SECURE — passed.'));
     checkReady();
   } catch (e) {
+    verifyOk = false;
     log('VERIFY', 'error', { message: e.message, code: e.code });
     setStatus('verify_status', 'err', 'Verify error: ' + (e.message || e.code));
+    checkReady();
   }
 }
 
 function checkReady() {
-  const canTransfer = !!(parsed && tronWeb && bAddress && mode === 'naive');
+  const canTransfer = !!(verifyOk && parsed && tronWeb && bAddress && mode === 'naive');
   $('btn_transfer').disabled = !canTransfer;
 }
 
+/* ─────────────  transfer USDT  ───────────── */
+
 async function executeTransfer() {
-  if (!tronWeb || !bAddress || !parsed) {
+  if (!tronWeb || !bAddress || !parsed || !verifyOk) {
     setStatus('transfer_status', 'err', 'Not ready.');
     return;
   }
@@ -267,8 +346,8 @@ async function executeTransfer() {
   const amountStr = $('amount').value.trim();
   const amount = Number(amountStr);
 
-  if (!recipient || !recipient.startsWith('T')) {
-    setStatus('transfer_status', 'err', 'Recipient must be TRON address (T…).');
+  if (!recipient || !/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(recipient)) {
+    setStatus('transfer_status', 'err', 'Recipient must be valid TRON base58 (T…, 34 chars).');
     return;
   }
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -279,22 +358,24 @@ async function executeTransfer() {
   try {
     $('btn_transfer').disabled = true;
     setStatus('transfer_status', '', 'Building USDT transfer…');
-    log('TRANSFER', 'building triggerSmartContract', {
-      contract: USDT_CONTRACT, recipient, amount, from: bAddress
+    log('TRANSFER', 'triggerSmartContract', {
+      host: DAPP_HOST,
+      contract: USDT_CONTRACT,
+      recipient,
+      amount,
+      from: bAddress,
     });
 
-    // USDT has 6 decimals: 1 USDT = 1_000_000
-    const amountSun = Math.floor(amount * 1_000_000);
-
-    // triggerSmartContract for transfer(address,uint256)
+    const amountSun = Math.floor(amount * Math.pow(10, USDT_DECIMALS));
     const parameter = [
       { type: 'address', value: recipient },
       { type: 'uint256', value: amountSun },
     ];
+
     const tx = await tronWeb.transactionBuilder.triggerSmartContract(
       USDT_CONTRACT,
       'transfer(address,uint256)',
-      { feeLimit: 100_000_000 }, // 100 TRX max fee limit [citation:6]
+      { feeLimit: FEE_LIMIT_SUN },
       parameter,
       bAddress
     );
@@ -311,12 +392,19 @@ async function executeTransfer() {
     const receipt = await tronWeb.trx.sendRawTransaction(signed);
 
     log('TRANSFER', 'broadcast result', receipt);
-    if (receipt.result === true || receipt.code === 'SUCCESS') {
-      setStatus('transfer_status', 'ok', 'Broadcast: ' + (receipt.txid || signed.txID));
-      log('TRANSFER', 'SUCCESS', { txid: receipt.txid || signed.txID });
+
+    const success =
+      receipt.result === true ||
+      receipt.code === 'SUCCESS' ||
+      (receipt.txid && !receipt.code);
+
+    if (success) {
+      const txid = receipt.txid || signed.txID;
+      setStatus('transfer_status', 'ok', 'Broadcast OK · txid ' + txid);
+      $('verify_result').innerHTML +=
+        `<b>txid</b><span style="word-break:break-all">${esc(txid)}</span>`;
     } else {
       setStatus('transfer_status', 'err', 'Broadcast failed: ' + JSON.stringify(receipt));
-      log('TRANSFER', 'failed', receipt);
     }
   } catch (e) {
     log('TRANSFER', 'error', { message: e.message, code: e.code, raw: String(e) });
@@ -325,10 +413,32 @@ async function executeTransfer() {
   }
 }
 
-renderEnv();
-renderMode();
-checkReady();
-log('BOOT', 'B up', { origin: location.origin });
+/* ─────────────  log controls + boot  ───────────── */
+
+function clearLog() { $('log_out').textContent = '—'; }
+function dumpLog() {
+  const t = $('log_out').textContent;
+  if (navigator.clipboard) navigator.clipboard.writeText(t);
+  log('DUMP', 'copied', { len: t.length });
+}
+
+/* async boot: try detect, but don't block */
+(async () => {
+  log('BOOT', 'B up', { origin: location.origin, host: DAPP_HOST });
+  renderEnv();
+  renderMode();
+  checkReady();
+
+  // passive polling on load, but connect is still user-driven
+  const p = await waitForTronLink(3000);
+  if (p) {
+    tronProvider = p;
+    renderEnv();
+    log('BOOT', 'TronLink ready at load', {});
+  } else {
+    log('BOOT', 'TronLink not present at load — connect button will poll', {});
+  }
+})();
 </script>
 </body>
 </html>
